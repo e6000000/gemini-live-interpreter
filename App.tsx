@@ -84,51 +84,54 @@ const App: React.FC = () => {
     return () => navigator.mediaDevices.removeEventListener('devicechange', refreshDevices);
   }, [refreshDevices]);
 
-  // Handle Toggle
-  const toggleSession = async () => {
-    if (loading) return;
+  // Start Session
+  const startSession = async () => {
+    if (active || loading) return;
 
-    if (active) {
-      setLoading(true);
-      try {
-        await clientRef.current?.stop();
-        setActive(false);
-        // Reset meters directly
-        if (inputMeterRef.current) inputMeterRef.current.style.width = '0%';
-        if (outputMeterRef.current) outputMeterRef.current.style.width = '0%';
-      } finally {
-        setLoading(false);
-      }
-    } else {
-      if (!selectedMic) {
-        alert("Please select a microphone first.");
-        return;
-      }
-      setLoading(true);
-      try {
-        await clientRef.current?.connect({
-          micDeviceId: selectedMic,
-          speakerDeviceId: selectedSpeaker,
-          languageMode: selectedLanguage,
-          customSource: selectedLanguage === LanguageMode.CUSTOM ? customSource : undefined,
-          customTarget: selectedLanguage === LanguageMode.CUSTOM ? customTarget : undefined,
-          onVolumeChange: (type, vol) => {
-            // Direct DOM manipulation - Zero React Overhead
-            const el = type === 'input' ? inputMeterRef.current : outputMeterRef.current;
-            if (el) {
-              const percent = Math.min(100, vol * 100);
-              el.style.width = `${percent}%`;
-            }
+    if (!selectedMic) {
+      alert("Please select a microphone first.");
+      return;
+    }
+    setLoading(true);
+    try {
+      await clientRef.current?.connect({
+        micDeviceId: selectedMic,
+        speakerDeviceId: selectedSpeaker,
+        languageMode: selectedLanguage,
+        customSource: selectedLanguage === LanguageMode.CUSTOM ? customSource : undefined,
+        customTarget: selectedLanguage === LanguageMode.CUSTOM ? customTarget : undefined,
+        onVolumeChange: (type, vol) => {
+          // Direct DOM manipulation - Zero React Overhead
+          const el = type === 'input' ? inputMeterRef.current : outputMeterRef.current;
+          if (el) {
+            const percent = Math.min(100, vol * 100);
+            el.style.width = `${percent}%`;
           }
-        });
-        setActive(true);
-      } catch (err) {
-        console.error("Failed to start session", err);
-        alert("Failed to start interpreter session. Check console for details.");
-        setActive(false);
-      } finally {
-        setLoading(false);
-      }
+        }
+      });
+      setActive(true);
+    } catch (err) {
+      console.error("Failed to start session", err);
+      alert("Failed to start interpreter session. Check console for details.");
+      setActive(false);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Stop Session
+  const stopSession = async () => {
+    if (!active || loading) return;
+    
+    setLoading(true);
+    try {
+      await clientRef.current?.stop();
+      setActive(false);
+      // Reset meters directly
+      if (inputMeterRef.current) inputMeterRef.current.style.width = '0%';
+      if (outputMeterRef.current) outputMeterRef.current.style.width = '0%';
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -170,37 +173,54 @@ const App: React.FC = () => {
         </div>
 
         {/* CENTER: Main Action */}
-        <div className="flex-1 flex flex-col items-center justify-center min-h-[200px] relative">
+        <div className="flex-1 flex flex-col items-center justify-center min-h-[250px] relative gap-10">
            
-           {/* Ambient Glow */}
-           <div className={`absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-64 h-64 rounded-full blur-[80px] transition-all duration-1000 ${active ? 'bg-blue-500/20' : 'bg-transparent'}`} />
-
-           <button
-            onClick={toggleSession}
-            disabled={loading}
-            className={`relative group flex items-center justify-center w-32 h-32 rounded-full border-4 transition-all duration-500 ${
-              loading ? 'bg-slate-800 border-slate-700 opacity-80 cursor-wait' :
-              active 
-              ? 'bg-slate-900 border-blue-500 shadow-[0_0_50px_rgba(59,130,246,0.5)] scale-110' 
-              : 'bg-indigo-600 border-indigo-400 hover:bg-indigo-500 hover:scale-105 shadow-xl shadow-indigo-500/30'
-            }`}
-           >
-             {/* Loading Spinner */}
-             {loading && (
-                 <span className="absolute inset-0 rounded-full border-4 border-slate-700 border-t-indigo-500 animate-spin"></span>
-             )}
-
-             {/* Ripple effect when active */}
-             {active && !loading && (
-               <span className="absolute inset-0 rounded-full border border-blue-400 animate-ping opacity-75"></span>
-             )}
-             
-             <MicIcon className={`w-12 h-12 transition-colors duration-300 ${active ? 'text-blue-500' : 'text-white'}`} />
+           {/* START BUTTON (Mic) - 3D Design */}
+           <div className="relative">
+              {/* Ambient Glow */}
+              <div className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-48 h-48 rounded-full blur-[60px] transition-all duration-700 ${active ? 'bg-blue-600/30' : 'bg-transparent'}`} />
+              
+              <button
+                onClick={startSession}
+                disabled={active || loading}
+                className={`
+                  relative group flex items-center justify-center w-36 h-36 rounded-[2.5rem] transition-all duration-300
+                  ${active 
+                    ? 'cursor-default scale-100 ring-2 ring-blue-500/50' 
+                    : 'cursor-pointer hover:scale-105 hover:-translate-y-1 shadow-2xl shadow-black/60'
+                  }
+                `}
+                style={{
+                   // 3D iPad-like gradient and shadows
+                   background: active ? 'linear-gradient(145deg, #0f172a, #1e293b)' : 'linear-gradient(145deg, #1e293b, #0f172a)',
+                   boxShadow: active 
+                      ? 'inset 0 4px 8px rgba(0,0,0,0.5)' 
+                      : '8px 8px 16px #0b1120, -8px -8px 16px #2a3a52, inset 0 1px 1px rgba(255,255,255,0.1)'
+                }}
+               >
+                 {loading ? (
+                    <span className="w-12 h-12 rounded-full border-4 border-slate-700 border-t-blue-500 animate-spin"></span>
+                 ) : (
+                    <MicIcon className={`w-14 h-14 transition-all duration-300 drop-shadow-lg ${active ? 'text-blue-400' : 'text-slate-400 group-hover:text-white'}`} />
+                 )}
+               </button>
+           </div>
+           
+           {/* OFF BUTTON - Always visible, Gradient 33deg, Wide */}
+           <button 
+              onClick={stopSession}
+              disabled={!active || loading}
+              className={`
+                w-64 h-14 rounded-xl flex items-center justify-center border transition-all duration-300
+                text-lg font-bold uppercase tracking-widest shadow-xl
+                ${active && !loading
+                  ? 'bg-gradient-to-br from-orange-700 via-purple-800 to-teal-700 border-white/10 text-white hover:scale-105 active:scale-95 shadow-purple-900/40 cursor-pointer'
+                  : 'bg-slate-800 border-slate-700 text-slate-600 opacity-50 cursor-not-allowed shadow-none grayscale'
+                }
+              `}
+            >
+              OFF
            </button>
-           
-           <p className={`mt-8 text-sm font-medium tracking-wide transition-colors ${active ? 'text-blue-400 animate-pulse' : 'text-slate-500'}`}>
-             {loading ? 'CONNECTING...' : active ? 'LISTENING & TRANSLATING...' : 'TAP TO START'}
-           </p>
 
         </div>
 
