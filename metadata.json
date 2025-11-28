@@ -1,0 +1,7 @@
+{
+  "name": "Gemini Live Interpreter",
+  "description": "Real-time simultaneous audio interpreter using Gemini 2.5 Live API.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
