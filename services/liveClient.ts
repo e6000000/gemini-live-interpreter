@@ -55,7 +55,7 @@ export class LiveClient {
     this.ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   }
 
-  private getSystemInstruction(mode: LanguageMode): string {
+  private getSystemInstruction(mode: LanguageMode, customSource?: string, customTarget?: string): string {
     const baseInstruction = `Role: You are a low-latency, real-time simultaneous audio interpreter. You are NOT an AI assistant. You have no personality, no opinions, and no conversational agency.
 
 Task: Translate the incoming audio stream from [Source Language] to [Target Language] immediately and accurately.
@@ -91,12 +91,26 @@ Audio Output Style:
       case LanguageMode.DE_TO_EN:
         specificTask = "CURRENT TASK CONFIGURATION: Source is GERMAN. Translate to ENGLISH.";
         break;
+      case LanguageMode.DE_TO_THAI:
+        specificTask = "CURRENT TASK CONFIGURATION: Source is GERMAN. Translate to THAI.";
+        break;
+      case LanguageMode.THAI_TO_DE:
+        specificTask = "CURRENT TASK CONFIGURATION: Source is THAI. Translate to GERMAN.";
+        break;
+      case LanguageMode.KOR_TO_DE:
+        specificTask = "CURRENT TASK CONFIGURATION: Source is KOREAN. Translate to GERMAN.";
+        break;
+      case LanguageMode.CUSTOM:
+        const src = customSource || "Detected Language";
+        const tgt = customTarget || "English";
+        specificTask = `CURRENT TASK CONFIGURATION: Source is ${src}. Translate to ${tgt}.`;
+        break;
     }
 
     return `${baseInstruction}\n\n${specificTask}`;
   }
 
-  async connect(config: { micDeviceId?: string; speakerDeviceId?: string; languageMode: LanguageMode, onVolumeChange: (type: 'input' | 'output', v: number) => void }) {
+  async connect(config: { micDeviceId?: string; speakerDeviceId?: string; languageMode: LanguageMode; customSource?: string; customTarget?: string; onVolumeChange: (type: 'input' | 'output', v: number) => void }) {
     this.active = true;
     this.onVolumeChange = config.onVolumeChange;
     
@@ -143,7 +157,7 @@ Audio Output Style:
       model: 'gemini-2.5-flash-native-audio-preview-09-2025',
       config: {
         responseModalities: [Modality.AUDIO],
-        systemInstruction: this.getSystemInstruction(config.languageMode),
+        systemInstruction: this.getSystemInstruction(config.languageMode, config.customSource, config.customTarget),
       },
       callbacks: {
         onopen: () => {

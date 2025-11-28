@@ -17,6 +17,12 @@ const ChevronDown = () => (
   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
 );
 
+const SUPPORTED_LANGUAGES = [
+  'English', 'German', 'Thai', 'Korean', 'French', 'Spanish', 
+  'Italian', 'Portuguese', 'Chinese (Mandarin)', 'Japanese', 
+  'Russian', 'Arabic', 'Hindi', 'Turkish', 'Vietnamese'
+];
+
 const App: React.FC = () => {
   const [active, setActive] = useState(false);
   const [inputDevices, setInputDevices] = useState<AudioDevice[]>([]);
@@ -26,6 +32,10 @@ const App: React.FC = () => {
   const [selectedSpeaker, setSelectedSpeaker] = useState<string>('');
   const [selectedLanguage, setSelectedLanguage] = useState<LanguageMode>(LanguageMode.AUTO_TO_GERMAN);
   
+  // Custom language state
+  const [customSource, setCustomSource] = useState('Auto Detect');
+  const [customTarget, setCustomTarget] = useState('German');
+
   const [inputLevel, setInputLevel] = useState(0);
   const [outputLevel, setOutputLevel] = useState(0);
 
@@ -90,6 +100,8 @@ const App: React.FC = () => {
           micDeviceId: selectedMic,
           speakerDeviceId: selectedSpeaker,
           languageMode: selectedLanguage,
+          customSource: selectedLanguage === LanguageMode.CUSTOM ? customSource : undefined,
+          customTarget: selectedLanguage === LanguageMode.CUSTOM ? customTarget : undefined,
           onVolumeChange: (type, vol) => {
             if (type === 'input') setInputLevel(vol);
             else setOutputLevel(vol);
@@ -232,6 +244,33 @@ const App: React.FC = () => {
               </select>
                <div className="absolute right-3 top-2.5 pointer-events-none text-slate-500"><ChevronDown/></div>
             </div>
+
+            {/* CUSTOM MODE SELECTORS */}
+            {selectedLanguage === LanguageMode.CUSTOM && (
+              <div className="grid grid-cols-2 gap-2 mt-2 pt-2 border-t border-slate-700/50 animate-[fadeIn_0.3s_ease-out]">
+                 <div className="relative">
+                    <select
+                      value={customSource}
+                      onChange={e => setCustomSource(e.target.value)}
+                      disabled={active}
+                      className="w-full bg-slate-800 border border-slate-600 rounded px-2 py-1.5 text-xs text-slate-300 focus:ring-1 focus:ring-indigo-500 focus:outline-none appearance-none"
+                    >
+                      <option>Auto Detect</option>
+                      {SUPPORTED_LANGUAGES.map(lang => <option key={lang}>{lang}</option>)}
+                    </select>
+                 </div>
+                 <div className="relative">
+                    <select
+                      value={customTarget}
+                      onChange={e => setCustomTarget(e.target.value)}
+                      disabled={active}
+                      className="w-full bg-slate-800 border border-slate-600 rounded px-2 py-1.5 text-xs text-slate-300 focus:ring-1 focus:ring-indigo-500 focus:outline-none appearance-none"
+                    >
+                       {SUPPORTED_LANGUAGES.map(lang => <option key={lang}>{lang}</option>)}
+                    </select>
+                 </div>
+              </div>
+            )}
           </div>
 
         </div>
