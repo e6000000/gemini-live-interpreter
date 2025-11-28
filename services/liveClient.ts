@@ -8,15 +8,43 @@ interface AudioContextWithSinkId extends AudioContext {
   sinkId: string;
 }
 
+// Inline AudioWorklet Processor code
+const workletCode = `
+class RecorderProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.bufferSize = 2048;
+    this.buffer = new Float32Array(this.bufferSize);
+    this.index = 0;
+  }
+
+  process(inputs, outputs, parameters) {
+    const input = inputs[0];
+    if (input && input.length > 0) {
+      const channel = input[0];
+      for (let i = 0; i < channel.length; i++) {
+        this.buffer[this.index++] = channel[i];
+        if (this.index >= this.bufferSize) {
+          this.port.postMessage(this.buffer);
+          this.index = 0;
+        }
+      }
+    }
+    return true;
+  }
+}
+registerProcessor('recorder-processor', RecorderProcessor);
+`;
+
 export class LiveClient {
   private ai: GoogleGenAI;
   private inputContext: AudioContext | null = null;
   private outputContext: AudioContextWithSinkId | null = null;
   private stream: MediaStream | null = null;
-  private scriptProcessor: ScriptProcessorNode | null = null;
+  private workletNode: AudioWorkletNode | null = null;
   private sourceNode: MediaStreamAudioSourceNode | null = null;
   private nextStartTime = 0;
-  private currentSession: Promise<any> | null = null; // Storing the promise
+  private currentSession: Promise<any> | null = null; 
   private active = false;
   private onVolumeChange: ((type: 'input' | 'output', volume: number) => void) | null = null;
   private inputAnalyser: AnalyserNode | null = null;
@@ -77,6 +105,11 @@ Audio Output Style:
     this.inputContext = new AudioContext({ sampleRate: 16000 });
     this.outputContext = new AudioContext({ sampleRate: 24000 }) as AudioContextWithSinkId;
 
+    // Load AudioWorklet
+    const blob = new Blob([workletCode], { type: "application/javascript" });
+    const workletUrl = URL.createObjectURL(blob);
+    await this.inputContext.audioWorklet.addModule(workletUrl);
+
     // 2. Configure Output Device (if supported)
     if (config.speakerDeviceId && typeof this.outputContext.setSinkId === 'function') {
       try {
@@ -88,7 +121,7 @@ Audio Output Style:
 
     // 3. Setup Analysers
     this.inputAnalyser = this.inputContext.createAnalyser();
-    this.inputAnalyser.fftSize = 64; // Small for performance
+    this.inputAnalyser.fftSize = 64; 
     this.inputAnalyser.smoothingTimeConstant = 0.5;
     this.outputAnalyser = this.outputContext.createAnalyser();
     this.outputAnalyser.fftSize = 64;
@@ -133,29 +166,36 @@ Audio Output Style:
     if (!this.inputContext || !this.stream || !this.currentSession) return;
 
     this.sourceNode = this.inputContext.createMediaStreamSource(this.stream);
-    this.scriptProcessor = this.inputContext.createScriptProcessor(4096, 1, 1);
     
-    // Connect for analysis
-    this.sourceNode.connect(this.inputAnalyser!);
-    
-    // Connect for processing
-    this.sourceNode.connect(this.scriptProcessor);
-    this.scriptProcessor.connect(this.inputContext.destination);
-
-    this.scriptProcessor.onaudioprocess = (e) => {
+    // Connect to Worklet
+    this.workletNode = new AudioWorkletNode(this.inputContext, 'recorder-processor');
+    this.workletNode.port.onmessage = (event) => {
       if (!this.active) return;
       
-      const inputData = e.inputBuffer.getChannelData(0);
+      const inputData = event.data;
       const blob = pcmToGeminiBlob(inputData, 16000);
       
       this.currentSession?.then(session => {
          session.sendRealtimeInput({ media: blob });
       });
     };
+
+    // Connect Analysis (Main Thread)
+    this.sourceNode.connect(this.inputAnalyser!);
+    
+    // Connect Processing (Audio Thread)
+    this.sourceNode.connect(this.workletNode);
+    this.workletNode.connect(this.inputContext.destination);
   }
 
   private async handleMessage(message: LiveServerMessage) {
     if (!this.outputContext) return;
+
+    // Handle Interruption (Logic simplified to NOT stop audio)
+    if (message.serverContent?.interrupted) {
+      this.nextStartTime = this.outputContext.currentTime;
+      return; 
+    }
 
     // Handle Audio Output
     const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
@@ -169,17 +209,13 @@ Audio Output Style:
         console.error("Error decoding audio", error);
       }
     }
-
-    // Handle Interruption
-    if (message.serverContent?.interrupted) {
-      this.nextStartTime = this.outputContext.currentTime;
-    }
   }
 
   private queueAudio(buffer: AudioBuffer) {
     if (!this.outputContext || !this.outputAnalyser) return;
 
     const now = this.outputContext.currentTime;
+    // If next start time is in the past (gap), reset to now
     if (this.nextStartTime < now) {
       this.nextStartTime = now + 0.05; 
     }
@@ -202,13 +238,11 @@ Audio Output Style:
       if (this.inputAnalyser && this.onVolumeChange) {
         this.inputAnalyser.getByteTimeDomainData(dataArray);
         let max = 0;
-        // Integer-based loop to find max deviation from 128 (silence)
         for(let i=0; i<64; i++) {
            let val = dataArray[i] - 128; 
            if (val < 0) val = -val;
            if (val > max) max = val;
         }
-        // Normalize to 0-1 for UI
         this.onVolumeChange('input', max / 128);
       }
 
@@ -236,10 +270,9 @@ Audio Output Style:
       this.cleanupFrame = null;
     }
 
-    if (this.scriptProcessor) {
-      this.scriptProcessor.disconnect();
-      this.scriptProcessor.onaudioprocess = null;
-      this.scriptProcessor = null;
+    if (this.workletNode) {
+      this.workletNode.disconnect();
+      this.workletNode = null;
     }
     
     if (this.sourceNode) {
