@@ -25,6 +25,7 @@ const SUPPORTED_LANGUAGES = [
 
 const App: React.FC = () => {
   const [active, setActive] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [inputDevices, setInputDevices] = useState<AudioDevice[]>([]);
   const [outputDevices, setOutputDevices] = useState<AudioDevice[]>([]);
   
@@ -36,10 +37,11 @@ const App: React.FC = () => {
   const [customSource, setCustomSource] = useState('Auto Detect');
   const [customTarget, setCustomTarget] = useState('German');
 
-  const [inputLevel, setInputLevel] = useState(0);
-  const [outputLevel, setOutputLevel] = useState(0);
-
   const clientRef = useRef<LiveClient | null>(null);
+  
+  // Direct DOM refs for High Performance metering (No React Renders)
+  const inputMeterRef = useRef<HTMLDivElement>(null);
+  const outputMeterRef = useRef<HTMLDivElement>(null);
 
   // Initialize Client
   useEffect(() => {
@@ -54,7 +56,6 @@ const App: React.FC = () => {
   // Fetch Devices
   const refreshDevices = useCallback(async () => {
     try {
-      // Prompt for permission first to ensure labels are available
       await navigator.mediaDevices.getUserMedia({ audio: true });
       
       const devices = await navigator.mediaDevices.enumerateDevices();
@@ -85,16 +86,25 @@ const App: React.FC = () => {
 
   // Handle Toggle
   const toggleSession = async () => {
+    if (loading) return;
+
     if (active) {
-      await clientRef.current?.stop();
-      setActive(false);
-      setInputLevel(0);
-      setOutputLevel(0);
+      setLoading(true);
+      try {
+        await clientRef.current?.stop();
+        setActive(false);
+        // Reset meters directly
+        if (inputMeterRef.current) inputMeterRef.current.style.width = '0%';
+        if (outputMeterRef.current) outputMeterRef.current.style.width = '0%';
+      } finally {
+        setLoading(false);
+      }
     } else {
       if (!selectedMic) {
         alert("Please select a microphone first.");
         return;
       }
+      setLoading(true);
       try {
         await clientRef.current?.connect({
           micDeviceId: selectedMic,
@@ -103,8 +113,12 @@ const App: React.FC = () => {
           customSource: selectedLanguage === LanguageMode.CUSTOM ? customSource : undefined,
           customTarget: selectedLanguage === LanguageMode.CUSTOM ? customTarget : undefined,
           onVolumeChange: (type, vol) => {
-            if (type === 'input') setInputLevel(vol);
-            else setOutputLevel(vol);
+            // Direct DOM manipulation - Zero React Overhead
+            const el = type === 'input' ? inputMeterRef.current : outputMeterRef.current;
+            if (el) {
+              const percent = Math.min(100, vol * 100);
+              el.style.width = `${percent}%`;
+            }
           }
         });
         setActive(true);
@@ -112,6 +126,8 @@ const App: React.FC = () => {
         console.error("Failed to start session", err);
         alert("Failed to start interpreter session. Check console for details.");
         setActive(false);
+      } finally {
+        setLoading(false);
       }
     }
   };
@@ -142,12 +158,12 @@ const App: React.FC = () => {
         {/* TOP: Meters */}
         <div className="flex flex-col md:flex-row gap-4 md:gap-8 bg-slate-900/50 p-4 rounded-xl border border-slate-800/50">
            <PegelMeter 
-            level={inputLevel} 
+            ref={inputMeterRef}
             label="Input Microphone" 
             colorClass="bg-emerald-500" 
            />
            <PegelMeter 
-            level={outputLevel} 
+            ref={outputMeterRef}
             label="Output Speaker" 
             colorClass="bg-amber-500" 
            />
@@ -161,14 +177,21 @@ const App: React.FC = () => {
 
            <button
             onClick={toggleSession}
+            disabled={loading}
             className={`relative group flex items-center justify-center w-32 h-32 rounded-full border-4 transition-all duration-500 ${
+              loading ? 'bg-slate-800 border-slate-700 opacity-80 cursor-wait' :
               active 
               ? 'bg-slate-900 border-blue-500 shadow-[0_0_50px_rgba(59,130,246,0.5)] scale-110' 
               : 'bg-indigo-600 border-indigo-400 hover:bg-indigo-500 hover:scale-105 shadow-xl shadow-indigo-500/30'
             }`}
            >
+             {/* Loading Spinner */}
+             {loading && (
+                 <span className="absolute inset-0 rounded-full border-4 border-slate-700 border-t-indigo-500 animate-spin"></span>
+             )}
+
              {/* Ripple effect when active */}
-             {active && (
+             {active && !loading && (
                <span className="absolute inset-0 rounded-full border border-blue-400 animate-ping opacity-75"></span>
              )}
              
@@ -176,7 +199,7 @@ const App: React.FC = () => {
            </button>
            
            <p className={`mt-8 text-sm font-medium tracking-wide transition-colors ${active ? 'text-blue-400 animate-pulse' : 'text-slate-500'}`}>
-             {active ? 'LISTENING & TRANSLATING...' : 'TAP TO START'}
+             {loading ? 'CONNECTING...' : active ? 'LISTENING & TRANSLATING...' : 'TAP TO START'}
            </p>
 
         </div>
@@ -193,7 +216,7 @@ const App: React.FC = () => {
               <select 
                 value={selectedMic} 
                 onChange={e => setSelectedMic(e.target.value)}
-                disabled={active}
+                disabled={active || loading}
                 className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-sm text-slate-200 focus:ring-1 focus:ring-indigo-500 focus:outline-none disabled:opacity-50 appearance-none"
               >
                 {inputDevices.map(d => (
@@ -214,7 +237,7 @@ const App: React.FC = () => {
                 <select 
                 value={selectedSpeaker} 
                 onChange={e => setSelectedSpeaker(e.target.value)}
-                disabled={active}
+                disabled={active || loading}
                 className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-sm text-slate-200 focus:ring-1 focus:ring-indigo-500 focus:outline-none disabled:opacity-50 appearance-none"
               >
                 {outputDevices.map(d => (
@@ -234,8 +257,8 @@ const App: React.FC = () => {
             <div className="relative">
                <select 
                 value={selectedLanguage} 
-                onChange={e => !active && setSelectedLanguage(e.target.value as LanguageMode)}
-                disabled={active}
+                onChange={e => !active && !loading && setSelectedLanguage(e.target.value as LanguageMode)}
+                disabled={active || loading}
                 className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-sm text-slate-200 focus:ring-1 focus:ring-indigo-500 focus:outline-none disabled:opacity-50 appearance-none"
               >
                  {(Object.values(LanguageMode) as string[]).map((mode) => (
@@ -252,7 +275,7 @@ const App: React.FC = () => {
                     <select
                       value={customSource}
                       onChange={e => setCustomSource(e.target.value)}
-                      disabled={active}
+                      disabled={active || loading}
                       className="w-full bg-slate-800 border border-slate-600 rounded px-2 py-1.5 text-xs text-slate-300 focus:ring-1 focus:ring-indigo-500 focus:outline-none appearance-none"
                     >
                       <option>Auto Detect</option>
@@ -263,7 +286,7 @@ const App: React.FC = () => {
                     <select
                       value={customTarget}
                       onChange={e => setCustomTarget(e.target.value)}
-                      disabled={active}
+                      disabled={active || loading}
                       className="w-full bg-slate-800 border border-slate-600 rounded px-2 py-1.5 text-xs text-slate-300 focus:ring-1 focus:ring-indigo-500 focus:outline-none appearance-none"
                     >
                        {SUPPORTED_LANGUAGES.map(lang => <option key={lang}>{lang}</option>)}

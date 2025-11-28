@@ -1,6 +1,6 @@
 import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
 import { LanguageMode } from '../types';
-import { pcmToGeminiBlob, base64ToUint8Array, decodeAudioData } from '../utils/audioUtils';
+import { pcmToGeminiBlob } from '../utils/audioUtils';
 
 // Define the sink ID type for AudioContext (experimental feature)
 interface AudioContextWithSinkId extends AudioContext {
@@ -8,8 +8,8 @@ interface AudioContextWithSinkId extends AudioContext {
   sinkId: string;
 }
 
-// Inline AudioWorklet Processor code
-const workletCode = `
+// 1. INPUT WORKLET: Handles Microphone Stream (Audio Thread)
+const inputWorkletCode = `
 class RecorderProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
@@ -36,23 +36,69 @@ class RecorderProcessor extends AudioWorkletProcessor {
 registerProcessor('recorder-processor', RecorderProcessor);
 `;
 
+// 2. DECODER WORKER: Handles Base64 -> Float32 Conversion (Background Thread / Multi-core)
+// This offloads the CPU heavy string parsing from the main UI thread.
+const decoderWorkerCode = `
+self.onmessage = (e) => {
+  const base64 = e.data;
+  
+  // 1. Decode Base64 (Binary String)
+  const binaryString = atob(base64);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+
+  // 2. Convert PCM 16-bit to Float32
+  const dataInt16 = new Int16Array(bytes.buffer);
+  const float32 = new Float32Array(dataInt16.length);
+  for (let i = 0; i < dataInt16.length; i++) {
+    float32[i] = dataInt16[i] / 32768.0;
+  }
+
+  // 3. Transfer buffer back to Main Thread (Zero-Copy transfer if possible)
+  self.postMessage(float32, [float32.buffer]);
+};
+`;
+
 export class LiveClient {
   private ai: GoogleGenAI;
   private inputContext: AudioContext | null = null;
   private outputContext: AudioContextWithSinkId | null = null;
   private stream: MediaStream | null = null;
+  
+  // Input Nodes
   private workletNode: AudioWorkletNode | null = null;
   private sourceNode: MediaStreamAudioSourceNode | null = null;
+  
+  // Decoder Worker
+  private decoderWorker: Worker | null = null;
+
   private nextStartTime = 0;
   private currentSession: Promise<any> | null = null; 
   private active = false;
+  
+  // Direct callback for Game-Loop style updates (no React Overhead)
   private onVolumeChange: ((type: 'input' | 'output', volume: number) => void) | null = null;
+  
   private inputAnalyser: AnalyserNode | null = null;
   private outputAnalyser: AnalyserNode | null = null;
   private cleanupFrame: number | null = null;
 
   constructor() {
     this.ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    this.initDecoderWorker();
+  }
+
+  private initDecoderWorker() {
+    const blob = new Blob([decoderWorkerCode], { type: "application/javascript" });
+    this.decoderWorker = new Worker(URL.createObjectURL(blob));
+    
+    this.decoderWorker.onmessage = (e) => {
+      const audioData = e.data as Float32Array; // Received Float32 from worker
+      this.queueAudio(audioData);
+    };
   }
 
   private getSystemInstruction(mode: LanguageMode, customSource?: string, customTarget?: string): string {
@@ -119,12 +165,24 @@ Audio Output Style:
     this.inputContext = new AudioContext({ sampleRate: 16000 });
     this.outputContext = new AudioContext({ sampleRate: 24000 }) as AudioContextWithSinkId;
 
-    // Load AudioWorklet
-    const blob = new Blob([workletCode], { type: "application/javascript" });
-    const workletUrl = URL.createObjectURL(blob);
-    await this.inputContext.audioWorklet.addModule(workletUrl);
+    // Load Input AudioWorklet
+    try {
+      const blob = new Blob([inputWorkletCode], { type: "application/javascript" });
+      const workletUrl = URL.createObjectURL(blob);
+      await this.inputContext.audioWorklet.addModule(workletUrl);
+    } catch (e) {
+      console.error("Failed to load audio worklet", e);
+      // Try to clean up if failed
+      this.stop();
+      throw e;
+    }
 
-    // 2. Configure Output Device (if supported)
+    // Safety check: stop() might have been called while awaiting addModule
+    if (!this.active || !this.inputContext || !this.outputContext) {
+      return;
+    }
+
+    // 2. Configure Output Device
     if (config.speakerDeviceId && typeof this.outputContext.setSinkId === 'function') {
       try {
         await this.outputContext.setSinkId(config.speakerDeviceId);
@@ -144,13 +202,28 @@ Audio Output Style:
     this.startVolumeMonitoring();
 
     // 4. Get Input Stream
-    this.stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        deviceId: config.micDeviceId ? { exact: config.micDeviceId } : undefined,
-        channelCount: 1,
-        sampleRate: 16000,
-      }
-    });
+    try {
+        this.stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            deviceId: config.micDeviceId ? { exact: config.micDeviceId } : undefined,
+            channelCount: 1,
+            sampleRate: 16000,
+            echoCancellation: true, // Critical for simultaneous use
+            autoGainControl: true,
+            noiseSuppression: true
+          }
+        });
+    } catch (e) {
+        console.error("Failed to get user media", e);
+        this.stop();
+        throw e;
+    }
+
+    // Safety check: stop() might have been called while awaiting getUserMedia
+    if (!this.active || !this.inputContext) {
+      this.stop(); // Ensure cleanup
+      return;
+    }
 
     // 5. Connect to Gemini Live
     this.currentSession = this.ai.live.connect({
@@ -202,45 +275,44 @@ Audio Output Style:
     this.workletNode.connect(this.inputContext.destination);
   }
 
-  private async handleMessage(message: LiveServerMessage) {
+  private handleMessage(message: LiveServerMessage) {
     if (!this.outputContext) return;
 
-    // Handle Interruption (Logic simplified to NOT stop audio)
+    // Do NOT stop audio on interruption to allow simultaneous output
     if (message.serverContent?.interrupted) {
-      this.nextStartTime = this.outputContext.currentTime;
-      return; 
+       // logic removed
     }
 
-    // Handle Audio Output
     const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
     if (base64Audio) {
-      try {
-        const audioData = base64ToUint8Array(base64Audio);
-        const audioBuffer = await decodeAudioData(audioData, this.outputContext, 24000);
-        
-        this.queueAudio(audioBuffer);
-      } catch (error) {
-        console.error("Error decoding audio", error);
-      }
+      // Send to Worker for parallel processing
+      this.decoderWorker?.postMessage(base64Audio);
     }
   }
 
-  private queueAudio(buffer: AudioBuffer) {
+  // Called when Worker finishes decoding
+  private queueAudio(float32Data: Float32Array) {
     if (!this.outputContext || !this.outputAnalyser) return;
 
+    const buffer = this.outputContext.createBuffer(1, float32Data.length, 24000);
+    buffer.copyToChannel(float32Data, 0);
+
     const now = this.outputContext.currentTime;
-    // If next start time is in the past (gap), reset to now
-    if (this.nextStartTime < now) {
-      this.nextStartTime = now + 0.05; 
-    }
+    // Gapless scheduling
+    this.nextStartTime = Math.max(this.nextStartTime, now);
 
     const source = this.outputContext.createBufferSource();
     source.buffer = buffer;
-    source.connect(this.outputAnalyser); // Route through analyser
+    source.connect(this.outputAnalyser); 
     this.outputAnalyser.connect(this.outputContext.destination);
     
     source.start(this.nextStartTime);
     this.nextStartTime += buffer.duration;
+
+    // Automatic Garbage Collection
+    source.onended = () => {
+      source.disconnect();
+    };
   }
 
   private startVolumeMonitoring() {
@@ -251,24 +323,26 @@ Audio Output Style:
 
       if (this.inputAnalyser && this.onVolumeChange) {
         this.inputAnalyser.getByteTimeDomainData(dataArray);
-        let max = 0;
-        for(let i=0; i<64; i++) {
-           let val = dataArray[i] - 128; 
-           if (val < 0) val = -val;
-           if (val > max) max = val;
+        // Standard RMS calculation
+        let sum = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+            const x = (dataArray[i] - 128) / 128.0;
+            sum += x * x;
         }
-        this.onVolumeChange('input', max / 128);
+        const rms = Math.sqrt(sum / dataArray.length);
+        // Boost factor for visibility
+        this.onVolumeChange('input', Math.min(1, rms * 4)); 
       }
 
       if (this.outputAnalyser && this.onVolumeChange) {
         this.outputAnalyser.getByteTimeDomainData(dataArray);
-        let max = 0;
-        for(let i=0; i<64; i++) {
-           let val = dataArray[i] - 128;
-           if (val < 0) val = -val;
-           if (val > max) max = val;
+        let sum = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+            const x = (dataArray[i] - 128) / 128.0;
+            sum += x * x;
         }
-        this.onVolumeChange('output', max / 128);
+        const rms = Math.sqrt(sum / dataArray.length);
+        this.onVolumeChange('output', Math.min(1, rms * 4));
       }
 
       this.cleanupFrame = requestAnimationFrame(update);
